@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: persona-engine
+
+  ai:
+    # ─── PRIMARY MODEL: Ollama (local, offline, free) ────────────────────────
+    ollama:
+      # Use 127.0.0.1 (not localhost) — on Windows+WSL2, localhost can resolve to ::1
+      # which hits wslrelay.exe instead of Docker's port proxy, causing silent hangs.
+      base-url: ${OLLAMA_BASE_URL:http://127.0.0.1:11434}
+      chat:
+        options:
+          model: ${OLLAMA_MODEL:mistral}
+          temperature: 0.2
+          num-predict: 256
+
+    # ─── FALLBACK MODEL: OpenAI (default cloud fallback) ─────────────────────
+    # Set OPENAI_API_KEY env var to enable.
+    # To use Anthropic: add spring-ai-anthropic-spring-boot-starter dependency
+    #   and set ANTHROPIC_API_KEY instead.
+    #openai:
+    #  api-key: ${OPENAI_API_KEY:DISABLED}
+    #  chat:
+    #    options:
+    #      model: ${FALLBACK_MODEL:gpt-4o-mini}
+    #      temperature: 0.2
+    openai:
+      base-url: https://api.groq.com/openai
+      api-key: ${GROQ_API_KEY}
+      chat:
+        options:
+          model: ${FALLBACK_MODEL:llama-3.1-8b-instant}
+          temperature: 0.2
+
+# ─── PERSONA ENGINE CONFIGURATION ─────────────────────────────────────────────
+persona:
+  # Directory (classpath) where persona YAML files are located
+  definitions-path: classpath:/personas/
+  # Fallback trigger strategy: CONTRACT_FAILURE | ON_ERROR | ALWAYS
+  fallback:
+    trigger: ${FALLBACK_TRIGGER:CONTRACT_FAILURE}
+    provider: ${FALLBACK_PROVIDER:openai}
+
+server:
+  port: ${SERVER_PORT:8080}
+
+logging:
+  level:
+    com.example.persona: DEBUG
+    org.springframework.ai: INFO

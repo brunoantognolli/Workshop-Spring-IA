@@ -1,0 +1,188 @@
+package com.example.persona.core;
+
+import com.example.persona.contracts.OutputValidator;
+import com.example.persona.contracts.ValidationResult;
+import com.example.persona.guardrails.BoundaryAdvisor;
+import com.example.persona.guardrails.BoundaryViolationException;
+import com.example.persona.routing.FallbackTrigger;
+import com.example.persona.skills.SkillRegistrar;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.converter.BeanOutputConverter;
+import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Core orchestrator for running a {@link PersonaDefinition} against user input.
+ *
+ * <h3>Execution flow:</h3>
+ * <ol>
+ *   <li>Build system prompt from {@code role} + {@code boundaries}</li>
+ *   <li>Register skills as LLM tools via {@link SkillRegistrar}</li>
+ *   <li>Execute with the PRIMARY model (Ollama mistral:7b)</li>
+ *   <li>Validate output against the declared {@code output_contract}</li>
+ *   <li>If validation fails → escalate to FALLBACK cloud model</li>
+ *   <li>Apply {@link BoundaryAdvisor} guardrails on every call</li>
+ *   <li>Deserialize and return the typed output object</li>
+ * </ol>
+ */
+@Component
+public class PersonaEngine {
+
+    private static final Logger log = LoggerFactory.getLogger(PersonaEngine.class);
+
+    private final OllamaChatModel primaryModel;
+    private final Optional<OpenAiChatModel> fallbackModel;
+    private final SkillRegistrar skillRegistrar;
+    private final OutputValidator outputValidator;
+    private final ObjectMapper objectMapper;
+
+    public PersonaEngine(OllamaChatModel primaryModel,
+                         Optional<OpenAiChatModel> fallbackModel,
+                         SkillRegistrar skillRegistrar,
+                         OutputValidator outputValidator) {
+        this.primaryModel = primaryModel;
+        this.fallbackModel = fallbackModel;
+        this.skillRegistrar = skillRegistrar;
+        this.outputValidator = outputValidator;
+        this.objectMapper = new ObjectMapper();
+    }
+
+    /**
+     * Executes the persona against the given user input.
+     *
+     * @param persona   the fully-loaded persona definition
+     * @param userInput raw input text (e.g., Java source code, ADR text)
+     * @return deserialized output object matching the declared output contract schema
+     */
+    public Object execute(PersonaDefinition persona, String userInput) {
+        Class<?> outputClass = resolveOutputClass(persona.outputContract().schema());
+        BeanOutputConverter<?> converter = new BeanOutputConverter<>(outputClass);
+
+        String systemPrompt = buildSystemPrompt(persona, converter.getFormat());
+        List<ToolCallback> tools = skillRegistrar.registerSkills(persona.skills());
+        BoundaryAdvisor advisor = new BoundaryAdvisor(persona.boundaries(), persona.guardrails());
+
+        FallbackTrigger trigger = resolveTrigger(persona);
+
+        // --- ALWAYS: skip primary and go straight to fallback ---
+        if (trigger == FallbackTrigger.ALWAYS) {
+            log.info("[{}] Trigger=ALWAYS — using cloud fallback directly", persona.id());
+            return executeAndConvert(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools, converter);
+        }
+
+        // --- Try PRIMARY (Ollama) ---
+        try {
+            log.info("[{}] Calling primary model (Ollama mistral:7b)", persona.id());
+            String rawResponse = callModel(buildClient(primaryModel, advisor), systemPrompt, userInput, tools);
+
+            ValidationResult validation = outputValidator.validate(rawResponse, outputClass);
+            if (validation.pass()) {
+                log.info("[{}] Primary model: contract validation PASSED", persona.id());
+                return converter.convert(rawResponse);
+            }
+
+            log.warn("[{}] Primary model: contract validation FAILED — {}", persona.id(), validation.errors());
+            if (trigger == FallbackTrigger.CONTRACT_FAILURE) {
+                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor);
+            }
+            return converter.convert(rawResponse);
+
+        } catch (BoundaryViolationException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[{}] Primary model threw exception: {}", persona.id(), e.getMessage());
+            if (trigger == FallbackTrigger.ON_ERROR || trigger == FallbackTrigger.CONTRACT_FAILURE) {
+                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor);
+            }
+            throw new PersonaExecutionException("Primary model failed with no fallback configured", e);
+        }
+    }
+
+    // ─── Private helpers ──────────────────────────────────────────────────────
+
+    private Object escalateToFallback(PersonaDefinition persona,
+                                      String systemPrompt, String userInput,
+                                      List<ToolCallback> tools,
+                                      BeanOutputConverter<?> converter,
+                                      BoundaryAdvisor advisor) {
+        log.info("[{}] Escalating to cloud fallback model", persona.id());
+        ChatClient fallbackClient = buildClient(fallbackModel(), advisor);
+        return executeAndConvert(fallbackClient, systemPrompt, userInput, tools, converter);
+    }
+
+    private Object executeAndConvert(ChatClient client, String systemPrompt,
+                                     String userInput, List<ToolCallback> tools,
+                                     BeanOutputConverter<?> converter) {
+        String raw = callModel(client, systemPrompt, userInput, tools);
+        return converter.convert(raw);
+    }
+
+    private String callModel(ChatClient client, String systemPrompt,
+                              String userInput, List<ToolCallback> tools) {
+        return client.prompt()
+                .system(systemPrompt)
+                .user(userInput)
+                .toolCallbacks(tools.toArray(ToolCallback[]::new))
+                .call()
+                .content();
+    }
+
+    private ChatClient buildClient(ChatModel model, BoundaryAdvisor advisor) {
+        return ChatClient.builder(model).defaultAdvisors(advisor).build();
+    }
+
+    private OpenAiChatModel fallbackModel() {
+        return fallbackModel.orElseThrow(() ->
+                new PersonaExecutionException(
+                        "Cloud fallback required but OPENAI_API_KEY is not configured. " +
+                        "Set the OPENAI_API_KEY environment variable to enable fallback."));
+    }
+
+    private String buildSystemPrompt(PersonaDefinition persona, String formatInstructions) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Role\n").append(persona.role()).append("\n\n");
+
+        if (persona.boundaries() != null && !persona.boundaries().isEmpty()) {
+            sb.append("# Strict Boundaries\n");
+            persona.boundaries().forEach(b -> sb.append("- ").append(b).append("\n"));
+            sb.append("\n");
+        }
+
+        sb.append("# Output Format\n").append(formatInstructions);
+        return sb.toString();
+    }
+
+    private Class<?> resolveOutputClass(String fullyQualifiedName) {
+        try {
+            return Class.forName(fullyQualifiedName);
+        } catch (ClassNotFoundException e) {
+            throw new PersonaExecutionException(
+                    "Output contract class not found: " + fullyQualifiedName +
+                    ". Ensure the Java Record is on the classpath.", e);
+        }
+    }
+
+    private FallbackTrigger resolveTrigger(PersonaDefinition persona) {
+        if (persona.model() != null && persona.model().fallback() != null
+                && persona.model().fallback().trigger() != null) {
+            return persona.model().fallback().trigger();
+        }
+        return FallbackTrigger.CONTRACT_FAILURE;
+    }
+
+    /** Thrown when persona execution fails unrecoverably. */
+    public static class PersonaExecutionException extends RuntimeException {
+        public PersonaExecutionException(String message) { super(message); }
+        public PersonaExecutionException(String message, Throwable cause) { super(message, cause); }
+    }
+}

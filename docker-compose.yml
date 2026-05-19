@@ -1,0 +1,34 @@
+version: "3.9"
+
+# Persona as Code — Local Infrastructure
+# Starts Ollama with mistral:7b for the primary (local, offline) model.
+#
+# Usage:
+#   docker-compose up -d          # start Ollama
+#   docker-compose exec ollama ollama pull mistral   # pull model (first time)
+#   docker-compose down           # stop
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: persona-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    # Uncomment below to use a GPU (NVIDIA)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+
+
+volumes:
+  ollama_data:

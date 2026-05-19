@@ -1,0 +1,6 @@
+com\example\persona\contracts\OutputValidatorTest.class
+com\example\persona\integration\JavaDocFactCoverageTest.class
+com\example\persona\integration\JavaDocMetamorphicTest.class
+com\example\persona\integration\AdrReviewerFactCoverageTest.class
+com\example\persona\core\PersonaLoaderTest.class
+com\example\persona\guardrails\BoundaryAdvisorTest.class
