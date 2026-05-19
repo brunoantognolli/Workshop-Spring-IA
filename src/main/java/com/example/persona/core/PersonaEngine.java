@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Optional;
+import reactor.core.publisher.Flux;
 
 /**
  * Core orchestrator for running a {@link PersonaDefinition} against user input.
@@ -65,10 +66,21 @@ public class PersonaEngine {
      * @return deserialized output object matching the declared output contract schema
      */
     public Object execute(PersonaDefinition persona, String userInput) {
-        Class<?> outputClass = resolveOutputClass(persona.outputContract().schema());
-        BeanOutputConverter<?> converter = new BeanOutputConverter<>(outputClass);
+        return execute(persona, userInput, false);
+    }
 
-        String systemPrompt = buildSystemPrompt(persona, converter.getFormat());
+    public Object execute(PersonaDefinition persona, String userInput, boolean ignoreContract) {
+        String formatInstructions = "";
+        BeanOutputConverter<?> converter = null;
+        Class<?> outputClass = null;
+
+        if (!ignoreContract && persona.outputContract() != null) {
+            outputClass = resolveOutputClass(persona.outputContract().schema());
+            converter = new BeanOutputConverter<>(outputClass);
+            formatInstructions = converter.getFormat();
+        }
+
+        String systemPrompt = buildSystemPrompt(persona, formatInstructions);
         List<ToolCallback> tools = skillRegistrar.registerSkills(persona.skills());
         BoundaryAdvisor advisor = new BoundaryAdvisor(persona.boundaries(), persona.guardrails());
 
@@ -77,13 +89,17 @@ public class PersonaEngine {
         // --- ALWAYS: skip primary and go straight to fallback ---
         if (trigger == FallbackTrigger.ALWAYS) {
             log.info("[{}] Trigger=ALWAYS — using cloud fallback directly", persona.id());
-            return executeAndConvert(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools, converter);
+            return executeAndConvert(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools, converter, ignoreContract);
         }
 
         // --- Try PRIMARY (Ollama) ---
         try {
             log.info("[{}] Calling primary model (Ollama mistral:7b)", persona.id());
             String rawResponse = callModel(buildClient(primaryModel, advisor), systemPrompt, userInput, tools);
+
+            if (ignoreContract || converter == null) {
+                return rawResponse;
+            }
 
             ValidationResult validation = outputValidator.validate(rawResponse, outputClass);
             if (validation.pass()) {
@@ -93,7 +109,7 @@ public class PersonaEngine {
 
             log.warn("[{}] Primary model: contract validation FAILED — {}", persona.id(), validation.errors());
             if (trigger == FallbackTrigger.CONTRACT_FAILURE) {
-                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor);
+                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor, ignoreContract);
             }
             return converter.convert(rawResponse);
 
@@ -102,10 +118,48 @@ public class PersonaEngine {
         } catch (Exception e) {
             log.warn("[{}] Primary model threw exception: {}", persona.id(), e.getMessage());
             if (trigger == FallbackTrigger.ON_ERROR || trigger == FallbackTrigger.CONTRACT_FAILURE) {
-                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor);
+                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor, ignoreContract);
             }
             throw new PersonaExecutionException("Primary model failed with no fallback configured", e);
         }
+    }
+
+    /**
+     * Executes the persona and streams the raw output bypassing runtime validation.
+     */
+    public Flux<String> streamUnvalidated(PersonaDefinition persona, String userInput) {
+        return streamUnvalidated(persona, userInput, false);
+    }
+
+    public Flux<String> streamUnvalidated(PersonaDefinition persona, String userInput, boolean ignoreContract) {
+        String formatInstructions = "";
+        if (!ignoreContract && persona.outputContract() != null) {
+            Class<?> outputClass = resolveOutputClass(persona.outputContract().schema());
+            BeanOutputConverter<?> converter = new BeanOutputConverter<>(outputClass);
+            formatInstructions = converter.getFormat();
+        }
+
+        String systemPrompt = buildSystemPrompt(persona, formatInstructions);
+        List<ToolCallback> tools = skillRegistrar.registerSkills(persona.skills());
+        BoundaryAdvisor advisor = new BoundaryAdvisor(persona.boundaries(), persona.guardrails());
+
+        FallbackTrigger trigger = resolveTrigger(persona);
+
+        if (trigger == FallbackTrigger.ALWAYS) {
+            log.info("[{}] Trigger=ALWAYS — streaming from cloud fallback directly", persona.id());
+            return streamModel(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools);
+        }
+
+        log.info("[{}] Streaming from primary model (Ollama)", persona.id());
+        return streamModel(buildClient(primaryModel, advisor), systemPrompt, userInput, tools)
+            .onErrorResume(e -> {
+                log.warn("[{}] Primary model threw exception during stream: {}", persona.id(), e.getMessage());
+                if (trigger == FallbackTrigger.ON_ERROR || trigger == FallbackTrigger.CONTRACT_FAILURE) {
+                    log.info("[{}] Escalating to cloud fallback model for stream", persona.id());
+                    return streamModel(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools);
+                }
+                return Flux.error(new PersonaExecutionException("Primary model failed with no fallback configured", e));
+            });
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────────
@@ -114,16 +168,20 @@ public class PersonaEngine {
                                       String systemPrompt, String userInput,
                                       List<ToolCallback> tools,
                                       BeanOutputConverter<?> converter,
-                                      BoundaryAdvisor advisor) {
+                                      BoundaryAdvisor advisor,
+                                      boolean ignoreContract) {
         log.info("[{}] Escalating to cloud fallback model", persona.id());
         ChatClient fallbackClient = buildClient(fallbackModel(), advisor);
-        return executeAndConvert(fallbackClient, systemPrompt, userInput, tools, converter);
+        return executeAndConvert(fallbackClient, systemPrompt, userInput, tools, converter, ignoreContract);
     }
 
     private Object executeAndConvert(ChatClient client, String systemPrompt,
                                      String userInput, List<ToolCallback> tools,
-                                     BeanOutputConverter<?> converter) {
+                                     BeanOutputConverter<?> converter, boolean ignoreContract) {
         String raw = callModel(client, systemPrompt, userInput, tools);
+        if (ignoreContract || converter == null) {
+            return raw;
+        }
         return converter.convert(raw);
     }
 
@@ -134,6 +192,16 @@ public class PersonaEngine {
                 .user(userInput)
                 .toolCallbacks(tools.toArray(ToolCallback[]::new))
                 .call()
+                .content();
+    }
+
+    private Flux<String> streamModel(ChatClient client, String systemPrompt,
+                                      String userInput, List<ToolCallback> tools) {
+        return client.prompt()
+                .system(systemPrompt)
+                .user(userInput)
+                .toolCallbacks(tools.toArray(ToolCallback[]::new))
+                .stream()
                 .content();
     }
 
@@ -158,7 +226,9 @@ public class PersonaEngine {
             sb.append("\n");
         }
 
-        sb.append("# Output Format\n").append(formatInstructions);
+        if (formatInstructions != null && !formatInstructions.isBlank()) {
+            sb.append("# Output Format\n").append(formatInstructions);
+        }
         return sb.toString();
     }
 

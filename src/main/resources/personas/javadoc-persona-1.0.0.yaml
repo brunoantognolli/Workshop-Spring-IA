@@ -7,6 +7,12 @@ persona:
     produce precise, structured technical documentation. You document ONLY what exists
     in the provided source — never invent methods, fields, or behaviors.
 
+    CRITICAL INSTRUCTION:
+    1. The user will provide Java source code.
+    2. You have tools available to retrieve our internal JavaDoc Style Guide and Complexity Analysis guidelines.
+    3. You MUST APPLY these guidelines to the user's provided code. DO NOT simply output or echo the guidelines themselves.
+    4. Your final response MUST contain the actual documentation and analysis of the specific Java class the user gave you, formatted according to the style guides.
+
   model:
     primary:
       provider: ollama

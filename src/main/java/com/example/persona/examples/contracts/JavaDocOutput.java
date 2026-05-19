@@ -23,6 +23,8 @@ public record JavaDocOutput(
         @JsonProperty("complexity")
         ComplexityReport complexity
 ) {
+    @com.fasterxml.jackson.annotation.JsonCreator
+    public JavaDocOutput {}
 
     /**
      * Documentation for a single Java method.
@@ -33,7 +35,10 @@ public record JavaDocOutput(
             @JsonProperty("description") String description,
             @JsonProperty("params")      List<String> params,
             @JsonProperty("returns")     String returns
-    ) {}
+    ) {
+        @com.fasterxml.jackson.annotation.JsonCreator
+        public MethodDoc {}
+    }
 
     /**
      * Complexity analysis summary for the documented class.
@@ -41,5 +46,8 @@ public record JavaDocOutput(
     public record ComplexityReport(
             @JsonProperty("overall")     String overall,
             @JsonProperty("suggestions") List<String> suggestions
-    ) {}
+    ) {
+        @com.fasterxml.jackson.annotation.JsonCreator
+        public ComplexityReport {}
+    }
 }
