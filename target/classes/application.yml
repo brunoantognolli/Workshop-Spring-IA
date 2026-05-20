@@ -29,7 +29,7 @@ spring:
       api-key: ${GROQ_API_KEY}
       chat:
         options:
-          model: ${FALLBACK_MODEL:llama-3.1-8b-instant}
+          model: ${FALLBACK_MODEL:llama-3.3-70b-versatile}
           temperature: 0.2
 
 # ─── PERSONA ENGINE CONFIGURATION ─────────────────────────────────────────────
