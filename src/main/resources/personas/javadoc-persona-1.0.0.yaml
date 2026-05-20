@@ -45,6 +45,26 @@ persona:
     format: json
     schema: "com.example.persona.examples.contracts.JavaDocOutput"
 
+  execution:
+    defaultMode: CHAT
+    supportedModes:
+      - CHAT
+      - JSON_API
+      - IDE_EDIT
+      - IDE_APPLY
+    adapters:
+      continue:
+        edit:
+          outputStrategy: FULL_FILE
+          allowMarkdown: false
+          allowJson: false
+          includeExplanation: false
+        apply:
+          outputStrategy: UNIFIED_DIFF
+          allowMarkdown: false
+          allowJson: false
+          includeExplanation: false
+
   tests:
     - type: fact_coverage
       threshold: 0.9

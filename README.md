@@ -72,6 +72,7 @@ persona:
 |---|---|---|
 | `javadoc-persona` | Senior Java documentation engineer | `JavaDocOutput` |
 | `adr-reviewer` | Expert software architect (ADR review) | `AdrReviewOutput` |
+| `unit-test-generator` | Expert Java test engineer (JUnit 5 + Mockito) | `UnitTestGeneratorOutput` |
 
 ---
 
@@ -129,6 +130,29 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   }'
 ```
 
+#### Execution Modes (Edit / Apply)
+
+Personas support execution mode suffixes that control output formatting:
+
+| Model Name | Mode | Output |
+|---|---|---|
+| `javadoc-persona` | Chat | Natural language / markdown |
+| `javadoc-persona:edit` | IDE Edit | Code only, no explanations |
+| `javadoc-persona:apply` | IDE Apply | Strictest — raw code or unified diff |
+| `javadoc-persona:json` | JSON API | Respects output_contract schema |
+
+```bash
+# IDE Edit mode — returns code only
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "unit-test-generator:edit",
+    "messages": [{"role": "user", "content": "Generate tests for: public class Foo { public int add(int a, int b) { return a + b; } }"}]
+  }'
+```
+
+See [docs/architecture/execution-adapter.md](docs/architecture/execution-adapter.md) for full details.
+
 #### Cursor IDE Setup
 1. Settings → Features → Beta → Enable OpenAI API
 2. Set API Key: `persona-engine-local` (any string)
@@ -136,18 +160,41 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 4. Select model: `javadoc-persona` or `adr-reviewer`
 
 #### Continue.dev Setup (VS Code)
-```json
-// ~/.continue/config.json
-{
-  "models": [{
-    "title": "JavaDoc Persona",
-    "provider": "openai",
-    "model": "javadoc-persona",
-    "apiBase": "http://localhost:8080/v1",
-    "apiKey": "local"
-  }]
-}
+
+```yaml
+# ~/.continue/config.yaml
+models:
+  # Chat mode — natural language responses
+  - name: JavaDoc Persona
+    provider: openai
+    model: javadoc-persona
+    apiBase: http://localhost:8080/v1
+    apiKey: local
+    roles:
+      - chat
+
+  # Edit mode — code-only responses for IDE edit actions
+  - name: Java Unit Test Agent
+    provider: openai
+    model: unit-test-generator:edit
+    apiBase: http://localhost:8080/v1
+    apiKey: local
+    roles:
+      - chat
+      - edit
+
+  # Apply mode — strictest, for direct code application
+  - name: Java Unit Test Apply
+    provider: openai
+    model: unit-test-generator:apply
+    apiBase: http://localhost:8080/v1
+    apiKey: local
+    roles:
+      - apply
 ```
+
+> **Tip:** For the `apply` role, consider using a more capable external model.
+> Local personas work best for `chat` and `edit` roles.
 
 ---
 
@@ -233,6 +280,9 @@ curl -X POST http://localhost:8080/api/personas/my-persona/run \
 ```
 src/main/java/com/example/persona/
 ├── core/          PersonaLoader, PersonaEngine, PersonaDefinition
+├── execution/     ExecutionAdapter, ExecutionContext, ModelNameParser,
+│                  PersonaRuntimeService, ChatAdapter, IdeEditAdapter,
+│                  IdeApplyAdapter, JsonApiAdapter, AdapterRegistry
 ├── skills/        SkillRegistrar (Markdown → FunctionCallback)
 ├── guardrails/    BoundaryAdvisor (CallAdvisor), BoundaryViolationException
 ├── contracts/     OutputValidator, ValidationResult
@@ -240,12 +290,16 @@ src/main/java/com/example/persona/
 └── examples/      JavaDocPersonaRunner, AdrReviewerPersonaRunner, contracts/
 
 src/main/resources/
-├── personas/      javadoc-persona-1.0.0.yaml, adr-reviewer-1.0.0.yaml
+├── personas/      javadoc-persona-1.0.0.yaml, adr-reviewer-1.0.0.yaml,
+│                  unit-test-generator-1.0.0.yaml
 └── skills/        java-doc-style-guide.md, java-complexity-analysis.md,
                    adr-format-rules.md, architecture-patterns.md
 
 src/test/java/com/example/persona/
 ├── core/          PersonaLoaderTest (unit)
+├── execution/     ModelNameParserTest, ExecutionAdapterRegistryTest,
+│                  IdeEditExecutionAdapterTest, IdeApplyExecutionAdapterTest,
+│                  ExecutionContextBuilderTest
 ├── guardrails/    BoundaryAdvisorTest (unit)
 ├── contracts/     OutputValidatorTest (unit)
 └── integration/   JavaDocFactCoverageTest, JavaDocMetamorphicTest,
@@ -262,6 +316,8 @@ src/test/java/com/example/persona/
 | **Skill** | Markdown file → `FunctionCallback` (LLM tool) |
 | **Guardrail** | `BoundaryAdvisor` (`CallAdvisor`) pattern matching |
 | **Output Contract** | `BeanOutputConverter<T>` + JSON Schema validation |
+| **Execution Adapter** | Adapts persona output for IDE/API/CI contexts |
+| **Execution Mode** | `:edit`, `:apply`, `:json` suffixes on model name |
 | **Fact Coverage Test** | `FactCheckingEvaluator` (LLM-as-Judge) |
 | **Metamorphic Test** | Variable renaming + Jaccard similarity |
 | **Local-first** | Ollama `mistral:7b`, no cloud cost by default |

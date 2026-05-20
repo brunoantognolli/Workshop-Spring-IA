@@ -3,6 +3,9 @@ package com.example.persona.api;
 import com.example.persona.api.dto.ChatCompletionRequest;
 import com.example.persona.api.dto.ModelListResponse;
 import com.example.persona.api.service.OpenAiCompatibleService;
+import com.example.persona.api.support.OpenAiMessageExtractor;
+import com.example.persona.api.support.StreamingErrorFormatter;
+import com.example.persona.core.PersonaEngine.PersonaExecutionException;
 import com.example.persona.core.PersonaLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,12 +69,15 @@ public class OpenAiCompatibleController {
      */
     @PostMapping("/chat/completions")
     public Object chatCompletions(@RequestBody ChatCompletionRequest request) {
-        String personaId = request.model();
-        log.info("OpenAI-compat request: model={}", personaId);
+        String modelName = request.model();
+        log.info("OpenAI-compat request: model={}, stream={}", modelName, request.stream());
 
         try {
-            String userInput = extractUserInput(request);
-            return service.processChatCompletion(personaId, userInput, request.stream());
+            String userInput = OpenAiMessageExtractor.extractUserInput(request);
+            if (OpenAiMessageExtractor.looksLikeContinueEditRequest(userInput)) {
+                log.info("Continue inline edit/apply prompt detected for model={}", modelName);
+            }
+            return service.processChatCompletion(modelName, userInput, request.stream());
 
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest()
@@ -79,26 +85,18 @@ public class OpenAiCompatibleController {
         } catch (PersonaLoader.PersonaLoadException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(Map.of("error", "model_not_found",
-                            "message", "Persona '" + personaId + "' not found. " +
+                            "message", "Persona for model '" + modelName + "' not found. " +
                                     "Use GET /v1/models to list available personas."));
+        } catch (PersonaExecutionException e) {
+            log.error("Chat completion failed for model '{}': {}", modelName, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                    .body(Map.of("error", "persona_execution_failed", "message", e.getMessage()));
         } catch (Exception e) {
-            log.error("Chat completion failed for persona '{}': {}", personaId, e.getMessage(), e);
+            String message = StreamingErrorFormatter.toReadableMessage(e);
+            log.error("Chat completion failed for model '{}': {}", modelName, message, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "internal_error", "message", e.getMessage()));
+                    .body(Map.of("error", "internal_error", "message", message));
         }
     }
 
-    private String extractUserInput(ChatCompletionRequest request) {
-        // Extract the last user message as the persona input
-        String userInput = request.messages().stream()
-                .filter(m -> "user".equalsIgnoreCase(m.role()))
-                .reduce((first, second) -> second)
-                .map(ChatCompletionRequest.Message::content)
-                .orElse("");
-
-        if (userInput.isBlank()) {
-            throw new IllegalArgumentException("No user message found in request");
-        }
-        return userInput;
-    }
 }

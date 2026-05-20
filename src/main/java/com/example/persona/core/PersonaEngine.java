@@ -78,7 +78,22 @@ public class PersonaEngine {
         return execute(persona, userInput, ignoreContract, null, null);
     }
 
+    /**
+     * Executes the persona using a pre-built system prompt (e.g. after execution adapter adaptation).
+     *
+     * @param systemPrompt complete system prompt to send to the LLM; must not be null or blank
+     */
+    public Object executeWithSystemPrompt(PersonaDefinition persona, String userInput,
+                                          boolean ignoreContract, String systemPrompt) {
+        return executeWithSystemPrompt(persona, userInput, ignoreContract, systemPrompt, null, null);
+    }
+
     public Object execute(PersonaDefinition persona, String userInput, boolean ignoreContract, String conversationId, String userId) {
+        return executeWithSystemPrompt(persona, userInput, ignoreContract, null, conversationId, userId);
+    }
+
+    public Object executeWithSystemPrompt(PersonaDefinition persona, String userInput, boolean ignoreContract,
+                                          String systemPromptOverride, String conversationId, String userId) {
         String formatInstructions = "";
         BeanOutputConverter<?> converter = null;
         Class<?> outputClass = null;
@@ -89,7 +104,7 @@ public class PersonaEngine {
             formatInstructions = converter.getFormat();
         }
 
-        String systemPrompt = buildSystemPrompt(persona, formatInstructions);
+        String systemPrompt = resolveSystemPrompt(persona, formatInstructions, systemPromptOverride);
         List<ToolCallback> tools = skillRegistrar.registerSkills(persona.skills());
         BoundaryAdvisor advisor = new BoundaryAdvisor(persona.boundaries(), persona.guardrails());
 
@@ -141,6 +156,16 @@ public class PersonaEngine {
     }
 
     public Flux<String> streamUnvalidated(PersonaDefinition persona, String userInput, boolean ignoreContract) {
+        return streamWithSystemPrompt(persona, userInput, ignoreContract, null);
+    }
+
+    /**
+     * Streams the persona response using a pre-built system prompt (e.g. after adapter adaptation).
+     *
+     * @param systemPrompt complete system prompt to send to the LLM; must not be null or blank
+     */
+    public Flux<String> streamWithSystemPrompt(PersonaDefinition persona, String userInput,
+                                               boolean ignoreContract, String systemPrompt) {
         String formatInstructions = "";
         if (!ignoreContract && persona.outputContract() != null) {
             Class<?> outputClass = resolveOutputClass(persona.outputContract().schema());
@@ -148,7 +173,7 @@ public class PersonaEngine {
             formatInstructions = converter.getFormat();
         }
 
-        String systemPrompt = buildSystemPrompt(persona, formatInstructions);
+        String resolvedPrompt = resolveSystemPrompt(persona, formatInstructions, systemPrompt);
         List<ToolCallback> tools = skillRegistrar.registerSkills(persona.skills());
         BoundaryAdvisor advisor = new BoundaryAdvisor(persona.boundaries(), persona.guardrails());
 
@@ -156,19 +181,30 @@ public class PersonaEngine {
 
         if (trigger == FallbackTrigger.ALWAYS) {
             log.info("[{}] Trigger=ALWAYS — streaming from cloud fallback directly", persona.id());
-            return streamModel(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools);
+            return streamModel(buildClient(fallbackModel(), advisor), resolvedPrompt, userInput, tools);
         }
 
         log.info("[{}] Streaming from primary model (Ollama)", persona.id());
-        return streamModel(buildClient(primaryModel, advisor), systemPrompt, userInput, tools)
+        return streamModel(buildClient(primaryModel, advisor), resolvedPrompt, userInput, tools)
             .onErrorResume(e -> {
                 log.warn("[{}] Primary model threw exception during stream: {}", persona.id(), e.getMessage());
                 if (trigger == FallbackTrigger.ON_ERROR || trigger == FallbackTrigger.CONTRACT_FAILURE) {
                     log.info("[{}] Escalating to cloud fallback model for stream", persona.id());
-                    return streamModel(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools);
+                    return streamModel(buildClient(fallbackModel(), advisor), resolvedPrompt, userInput, tools);
                 }
                 return Flux.error(new PersonaExecutionException("Primary model failed with no fallback configured", e));
             });
+    }
+
+    /**
+     * Uses the adapter-built prompt when provided; otherwise builds from persona + format instructions.
+     */
+    private String resolveSystemPrompt(PersonaDefinition persona, String formatInstructions,
+                                       String systemPromptOverride) {
+        if (systemPromptOverride != null && !systemPromptOverride.isBlank()) {
+            return systemPromptOverride;
+        }
+        return buildSystemPrompt(persona, formatInstructions);
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────────
@@ -242,7 +278,11 @@ public class PersonaEngine {
                         "Set the OPENAI_API_KEY environment variable to enable fallback."));
     }
 
-    private String buildSystemPrompt(PersonaDefinition persona, String formatInstructions) {
+    /**
+     * Builds the system prompt from the persona's role, boundaries, and format instructions.
+     * Public to allow access from {@link com.example.persona.execution.PersonaRuntimeService}.
+     */
+    public String buildSystemPrompt(PersonaDefinition persona, String formatInstructions) {
         StringBuilder sb = new StringBuilder();
         sb.append("# Role\n").append(persona.role()).append("\n\n");
 

@@ -12,7 +12,8 @@ spring:
         options:
           model: ${OLLAMA_MODEL:mistral}
           temperature: 0.2
-          num-predict: 256
+          # Edit/Apply need full files; 256 tokens truncates Continue diffs mid-response
+          num-predict: ${OLLAMA_NUM_PREDICT:8192}
 
     # ─── FALLBACK MODEL: OpenAI (default cloud fallback) ─────────────────────
     # Set OPENAI_API_KEY env var to enable.
@@ -40,6 +41,9 @@ persona:
   fallback:
     trigger: ${FALLBACK_TRIGGER:CONTRACT_FAILURE}
     provider: ${FALLBACK_PROVIDER:openai}
+  # Windows/local dev: Groq HTTPS may fail with PKIX / CRYPT_E_NO_REVOCATION_CHECK
+  ssl:
+    disable-revocation-check: ${PERSONA_SSL_DISABLE_REVOCATION_CHECK:true}
 
 server:
   port: ${SERVER_PORT:8080}

@@ -2,6 +2,7 @@ package com.example.persona.api;
 
 import com.example.persona.api.dto.RunPersonaRequest;
 import com.example.persona.api.dto.RunPersonaResponse;
+import com.example.persona.api.support.StreamingErrorFormatter;
 import com.example.persona.core.PersonaDefinition;
 import com.example.persona.core.PersonaEngine;
 import com.example.persona.core.PersonaLoader;
@@ -92,9 +93,10 @@ public class PersonaController {
                     .body(Map.of("error", "Boundary violation", "rule", e.getViolatedRule()));
 
         } catch (Exception e) {
-            log.error("Persona execution failed for '{}': {}", id, e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Execution failed: " + e.getMessage()));
+            String message = StreamingErrorFormatter.toReadableMessage(e);
+            log.error("Persona execution failed for '{}': {}", id, message, e);
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                    .body(Map.of("error", "execution_failed", "message", message));
         }
     }
 }
