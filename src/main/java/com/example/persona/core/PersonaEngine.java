@@ -21,6 +21,8 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Optional;
 import reactor.core.publisher.Flux;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 
 /**
  * Core orchestrator for running a {@link PersonaDefinition} against user input.
@@ -46,16 +48,19 @@ public class PersonaEngine {
     private final SkillRegistrar skillRegistrar;
     private final OutputValidator outputValidator;
     private final ObjectMapper objectMapper;
+    private final ChatMemory chatMemory;
 
     public PersonaEngine(OllamaChatModel primaryModel,
                          Optional<OpenAiChatModel> fallbackModel,
                          SkillRegistrar skillRegistrar,
-                         OutputValidator outputValidator) {
+                         OutputValidator outputValidator,
+                         ChatMemory chatMemory) {
         this.primaryModel = primaryModel;
         this.fallbackModel = fallbackModel;
         this.skillRegistrar = skillRegistrar;
         this.outputValidator = outputValidator;
         this.objectMapper = new ObjectMapper();
+        this.chatMemory = chatMemory;
     }
 
     /**
@@ -70,6 +75,10 @@ public class PersonaEngine {
     }
 
     public Object execute(PersonaDefinition persona, String userInput, boolean ignoreContract) {
+        return execute(persona, userInput, ignoreContract, null, null);
+    }
+
+    public Object execute(PersonaDefinition persona, String userInput, boolean ignoreContract, String conversationId, String userId) {
         String formatInstructions = "";
         BeanOutputConverter<?> converter = null;
         Class<?> outputClass = null;
@@ -89,13 +98,13 @@ public class PersonaEngine {
         // --- ALWAYS: skip primary and go straight to fallback ---
         if (trigger == FallbackTrigger.ALWAYS) {
             log.info("[{}] Trigger=ALWAYS — using cloud fallback directly", persona.id());
-            return executeAndConvert(buildClient(fallbackModel(), advisor), systemPrompt, userInput, tools, converter, ignoreContract);
+            return executeAndConvert(buildClientWithMemory(fallbackModel(), advisor, conversationId), systemPrompt, userInput, tools, converter, ignoreContract, conversationId);
         }
 
         // --- Try PRIMARY (Ollama) ---
         try {
             log.info("[{}] Calling primary model (Ollama mistral:7b)", persona.id());
-            String rawResponse = callModel(buildClient(primaryModel, advisor), systemPrompt, userInput, tools);
+            String rawResponse = callModel(buildClientWithMemory(primaryModel, advisor, conversationId), systemPrompt, userInput, tools, conversationId);
 
             if (ignoreContract || converter == null) {
                 return rawResponse;
@@ -109,7 +118,7 @@ public class PersonaEngine {
 
             log.warn("[{}] Primary model: contract validation FAILED — {}", persona.id(), validation.errors());
             if (trigger == FallbackTrigger.CONTRACT_FAILURE) {
-                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor, ignoreContract);
+                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor, ignoreContract, conversationId);
             }
             return converter.convert(rawResponse);
 
@@ -118,7 +127,7 @@ public class PersonaEngine {
         } catch (Exception e) {
             log.warn("[{}] Primary model threw exception: {}", persona.id(), e.getMessage());
             if (trigger == FallbackTrigger.ON_ERROR || trigger == FallbackTrigger.CONTRACT_FAILURE) {
-                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor, ignoreContract);
+                return escalateToFallback(persona, systemPrompt, userInput, tools, converter, advisor, ignoreContract, conversationId);
             }
             throw new PersonaExecutionException("Primary model failed with no fallback configured", e);
         }
@@ -169,16 +178,17 @@ public class PersonaEngine {
                                       List<ToolCallback> tools,
                                       BeanOutputConverter<?> converter,
                                       BoundaryAdvisor advisor,
-                                      boolean ignoreContract) {
+                                      boolean ignoreContract,
+                                      String conversationId) {
         log.info("[{}] Escalating to cloud fallback model", persona.id());
-        ChatClient fallbackClient = buildClient(fallbackModel(), advisor);
-        return executeAndConvert(fallbackClient, systemPrompt, userInput, tools, converter, ignoreContract);
+        ChatClient fallbackClient = buildClientWithMemory(fallbackModel(), advisor, conversationId);
+        return executeAndConvert(fallbackClient, systemPrompt, userInput, tools, converter, ignoreContract, conversationId);
     }
 
     private Object executeAndConvert(ChatClient client, String systemPrompt,
                                      String userInput, List<ToolCallback> tools,
-                                     BeanOutputConverter<?> converter, boolean ignoreContract) {
-        String raw = callModel(client, systemPrompt, userInput, tools);
+                                     BeanOutputConverter<?> converter, boolean ignoreContract, String conversationId) {
+        String raw = callModel(client, systemPrompt, userInput, tools, conversationId);
         if (ignoreContract || converter == null) {
             return raw;
         }
@@ -187,12 +197,20 @@ public class PersonaEngine {
 
     private String callModel(ChatClient client, String systemPrompt,
                               String userInput, List<ToolCallback> tools) {
-        return client.prompt()
+        return callModel(client, systemPrompt, userInput, tools, null);
+    }
+
+    private String callModel(ChatClient client, String systemPrompt,
+                              String userInput, List<ToolCallback> tools, String conversationId) {
+        ChatClient.ChatClientRequestSpec spec = client.prompt()
                 .system(systemPrompt)
                 .user(userInput)
-                .toolCallbacks(tools.toArray(ToolCallback[]::new))
-                .call()
-                .content();
+                .toolCallbacks(tools.toArray(ToolCallback[]::new));
+        if (conversationId != null) {
+            spec.advisors(a -> a.param("chat_memory_conversation_id", conversationId)
+                                .param("chat_memory_retrieve_size", 10));
+        }
+        return spec.call().content();
     }
 
     private Flux<String> streamModel(ChatClient client, String systemPrompt,
@@ -207,6 +225,14 @@ public class PersonaEngine {
 
     private ChatClient buildClient(ChatModel model, BoundaryAdvisor advisor) {
         return ChatClient.builder(model).defaultAdvisors(advisor).build();
+    }
+
+    private ChatClient buildClientWithMemory(ChatModel model, BoundaryAdvisor advisor, String conversationId) {
+        ChatClient.Builder builder = ChatClient.builder(model).defaultAdvisors(advisor);
+        if (conversationId != null) {
+            builder.defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build());
+        }
+        return builder.build();
     }
 
     private OpenAiChatModel fallbackModel() {

@@ -51,12 +51,23 @@ class PersonaLoaderTest {
     }
 
     @Test
-    @DisplayName("Should load both personas via loadAll()")
+    @DisplayName("Should load all personas via loadAll()")
     void shouldLoadAllPersonas() {
         List<PersonaDefinition> all = loader.loadAll();
-        assertThat(all).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(all).hasSizeGreaterThanOrEqualTo(3);
         assertThat(all).extracting(PersonaDefinition::id)
-                .containsExactlyInAnyOrder("javadoc-persona", "adr-reviewer");
+                .containsExactlyInAnyOrder("javadoc-persona", "adr-reviewer", "unit-test-generator");
+    }
+
+    @Test
+    @DisplayName("Should load unit-test-generator persona with all required fields")
+    void shouldLoadUnitTestGeneratorPersona() {
+        PersonaDefinition persona = loader.load("unit-test-generator");
+
+        assertThat(persona.id()).isEqualTo("unit-test-generator");
+        assertThat(persona.skills()).hasSize(2);
+        assertThat(persona.outputContract().schema())
+                .isEqualTo("com.example.persona.examples.contracts.UnitTestGeneratorOutput");
     }
 
     @Test

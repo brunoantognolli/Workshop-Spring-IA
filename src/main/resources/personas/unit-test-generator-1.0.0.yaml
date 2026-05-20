@@ -1,0 +1,10 @@
+
+  output_contract:
+    format: json
+    schema: "com.example.persona.examples.contracts.UnitTestGeneratorOutput"
+
+  tests:
+    - type: fact_coverage
+      threshold: 0.90
+    - type: metamorphic
+      threshold: 0.85
